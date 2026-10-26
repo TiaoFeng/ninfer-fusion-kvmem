@@ -34,6 +34,9 @@ registered in the engine's own `RECIPES` dicts):
 
 Verified end to end: text tower + vision from the model's own GGUFs, no checkpoint download, 131,072
 token KV pool on a 12 GiB card, needle retrieval at 66.5K tokens, vision description correct. The
+vision tower is stored **unquantized** (BF16, every parameter of it): the source mmproj is BF16, so
+this is the reference tower bit for bit, costing ~+600 MiB over the quantized Q4/Q5/Q6/Q8 ladder the
+engine's own recipes use. That ladder is not a preference -- see `DIGEST_PROFILE`. The
 `mtp` component turns the merged `blk.64` head into `--spec mtp` speculative decoding, the one part
 of the release's GGUFs the text+vision artifact used to drop.
 
@@ -65,7 +68,6 @@ try:
     import tools.convert.ternary as T
     from tools.convert import gguf_blocks as GB
     from tools.convert.methods import cast_direct, grouped_absmax, import_encoded
-    from tools.convert.official_recipes import Q4, Q5, Q6, Q8
     from tools.convert.sources.gguf import BLOCK_FORMATS
     from tools.convert.sources.gguf_source import (
         GGUFSource,
@@ -87,16 +89,21 @@ MTP_BLOCK_NAME = f"blk.{GB.MTP_BLOCK}"
 MTP_PREFIX = MTP_BLOCK_NAME + "."
 
 
-def vision_format(name: str) -> str:
-    """Mirror `gguf_blocks._vision_format`: the artifact's packed vision formats."""
-
-    if name == "vision/patch_embedding":
-        return Q6
-    if name.startswith("vision/merger/"):
-        return Q8
-    if name.endswith(("/attention/query", "/attention/key", "/attention/value", "/mlp/fc1")):
-        return Q4
-    return Q5
+# Vision precision is a recipe choice rather than a component, but it changes what the artifact
+# stores, so it belongs in the identity digest: a quantized-vision and a BF16-vision build of the same
+# GGUF must not look interchangeable to anything that keys on `weights_id`.
+#
+# The tower is stored **unquantized**: the source mmproj is BF16, `cast_direct` therefore writes the
+# reference weights themselves, and `bf16_dispatch` falls back to the engine's general runtime-shape
+# GEMM (`select_bf16_general_launch`) for shapes no specialised kernel covers. That fallback is what
+# makes this possible at all: Q4/Q5/Q6/Q8 linear are closed (n,k) whitelists, and the vision tower's
+# shapes are split across them -- patch embedding (1152,1536) exists only in Q6, the fused
+# query/key/value (3456,1152) and fc1 (4304,1152) only in Q4, output (1152,1152) and fc2 (1152,4304)
+# only in Q5, merger (4608,4608)/(5120,4608) only in Q8 -- so `gguf_blocks._vision_format`'s mixed
+# ladder is not a preference, it is the highest precision each shape has a kernel for. Uniform Q8 is
+# impossible (the engine rejects it with "q8 linear: unsupported shape"), BF16 is the only lossless
+# option.
+DIGEST_PROFILE = "vision=bf16"
 
 
 def mtp_tensors() -> dict[str, tuple[tuple[int, ...], str]]:
@@ -297,15 +304,14 @@ def make_optional(sources):
                 vision = mmproj
         for name, parameter in model.parameters.items():
             if name.startswith("vision/"):
-                source = model.source(name, vision)
-                if parameter.projection:
-                    recipe.assign(
-                        name, format=vision_format(name), method=grouped_absmax, source=source
-                    )
-                else:
-                    recipe.assign(
-                        name, format=parameter.direct_format, method=cast_direct, source=source
-                    )
+                # Unquantized, biases and norms included: `direct_format` is BF16 for every vision
+                # parameter, so this stores exactly the mmproj's weights (see `DIGEST_PROFILE`).
+                recipe.assign(
+                    name,
+                    format=parameter.direct_format,
+                    method=cast_direct,
+                    source=model.source(name, vision),
+                )
             elif name.startswith(("dflash/", "dflash2/")) and parameter.projection:
                 raise ValueError(
                     f"{name}: this recipe builds the text, vision and merged-MTP components only; "
@@ -327,10 +333,12 @@ def make_optional(sources):
 
 
 def _weights_id(gguf, components) -> str:
-    """A stable digest of what the artifact holds: the source GGUF plus the component list.
+    """A stable digest of what the artifact holds: the source GGUF, the components and the profile.
 
     The components belong in it: text+vision and text+vision+mtp are different artifacts over the same
-    GGUF, and an identity they share would tell any deduplicating tool they are interchangeable.
+    GGUF, and an identity they share would tell any deduplicating tool they are interchangeable. The
+    profile covers the other recipe choice that changes stored weights without changing components
+    (see `DIGEST_PROFILE`).
     """
 
     path = Path(gguf.path)
@@ -339,6 +347,7 @@ def _weights_id(gguf, components) -> str:
         digest.update(handle.read(8 * 1024 * 1024))
     digest.update(str(path.stat().st_size).encode("ascii"))
     digest.update(b"\0" + ",".join(sorted(components)).encode("ascii"))
+    digest.update(b"\0" + DIGEST_PROFILE.encode("ascii"))
     return digest.hexdigest()
 
 

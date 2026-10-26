@@ -29,7 +29,10 @@
 | `recipe_bonsai27b_ptq1.py` | 转换 recipe：放行 PTQ1_0 与 `blk.64`；Vision 走 `qwen35_vision_name_map` 从 mmproj 取；`blk.64` 的 MTP 头按存储的 ggml 块型（Q6_K/Q8_0）原样搬入（`--components text,vision,mtp`），走 `import_encoded`、不重新量化；并补上 `pipeline.convert` 漏传的 artifact `identity` | 用 `tools.convert` 转这条模型线的人 | **否**（由转换器调用，不能单独运行） | 作为参数：`--recipe <此文件>:bonsai2_27b_ternary`（引擎源码根需在 `PYTHONPATH` 上） |
 | `convert_bonsai27b_ptq1.py` | 一键驱动：校验引擎源码树、探测 `--python` 的 torch/CUDA、调上一支生成 config、再调 `tools.convert` 并流式打印进度 | 想一条命令出制品 / 复现实验的人 | **否**（要引擎**源码树**，不要服务在跑） | `python tools/convert_bonsai27b_ptq1.py --engine-src src-tree/fusion-engine-src --text-gguf <PTQ1_0>.gguf --mmproj-gguf <mmproj>.gguf --out <产物>.ninfer --python <装了torch的python>`（另有 `--reuse-config`、`--dry-run`、`--components`、`--name`） |
 
-> 用 **BF16** mmproj，别用 Q8_0：artifact 的 Vision 存 Q4/Q5/Q6/Q8，Q8_0 源会被解码后再量化一次。
+> 用 **BF16** mmproj：artifact 的 Vision 现在**整塔 BF16 无损存储**（`cast_direct`，约 +600 MiB，
+> 比 llama.cpp 用的 Q8_0 mmproj 还高一档）。原先的 Q4/Q5/Q6/Q8 混档阶梯不是偏好，而是引擎量化 GEMM
+> 的 (n,k) 白名单所致（patch 只有 Q6、fused qkv/fc1 只有 Q4、output/fc2 只有 Q5、merger 只有 Q8；
+> 统一 Q8 会被引擎以 `q8 linear: unsupported shape` 拒绝），BF16 走通用 runtime-shape GEMM 不受限制。
 > 三个「写错就启动失败」的细节已写在脚本注释里：added token 必须与 `model.vocab` 不相交；
 > `<think>` / `</think>` 必须是 `special: false`（否则引擎报 "cannot present the canonical thinking control suffix"）；
 > `pre_tokenizer` 的 ByteLevel 旗标与 `model` 的不变量不能动。
@@ -42,8 +45,8 @@
 > `gguf_blocks.MTP_BLOCK` 推导，不写死 `blk.64`；`--source mtp=` **会被拒绝**（MTP 头只从
 > `--source ternary=` 的那份 GGUF 读；若传入的本身是 PTQ1_0 GGUF，还会更早在 gguf-py 解析阶段报
 > `143 is not a valid GGMLQuantizationType`），`--components` 缺省时按 GGUF 是否含该头自动选择。
-> artifact 的 `weights_id` 已把 component 列表算进去：同一份 GGUF 产出的 text+vision 与
-> text+vision+mtp 不再共用 identity。
+> artifact 的 `weights_id` 已把 component 列表与视觉精度档（`DIGEST_PROFILE = vision=bf16`）算进去：
+> 同一份 GGUF 产出的 text+vision、text+vision+mtp、以及不同视觉精度的制品，都不再共用 identity。
 > 制品多了 `mtp` 组件后，`ninfer-serve` 要加 `--spec mtp` 才启用量子投机解码。
 > 实测（12 GB 显卡、temp 0、输出 400 token、93 token 题面）：`--spec none` 50.0 tok/s；
 > `--draft-tokens 1` 70.4（接受率 57.7%）、**`2` 91.1（61.8%，最佳）**、`3` 72.8（31.4%）、`4` 68.3；
