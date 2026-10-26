@@ -1,4 +1,11 @@
 #include "models/qwen3_8_flash_next/impl/expert_staging.h"
+
+// The CPU expert decode below (impl/cpu_expert_nvfp4.h) uses AVX2 and AVX-VNNI intrinsics with no
+// per-function target attributes. MSVC passes those through unconditionally; GCC needs the ISA
+// enabled, and -march=native does not define it on Zen 4 (which has AVX-512 VNNI instead).
+#if defined(__GNUC__) && !defined(_WIN32)
+#pragma GCC target("avx2,avxvnni")
+#endif
 #include "models/qwen3_8_flash_next/impl/cpu_expert_nvfp4.h"
 
 #include "core/arena.h"
@@ -60,10 +67,15 @@ namespace {
 // in a fixed order (ReadOperation, WriteOperation, OtherOperation, ReadTransfer, WriteTransfer,
 // OtherTransfer). If the call fails we return 0 and the printed residual says so out loud, instead of
 // silently reporting "no disk reads".
+#if defined(_WIN32)
 extern "C" __declspec(dllimport) void* __stdcall GetCurrentProcess();
 extern "C" __declspec(dllimport) int __stdcall GetProcessIoCounters(void* process, void* counters);
+#endif
 
 std::uint64_t process_read_transfer_bytes() {
+#if !defined(_WIN32)
+    return 0;  // GetProcessIoCounters is Win32; the ledger prints 0 with io_query=0 on Linux.
+#else
     struct IoCounters {
         unsigned long long read_operation_count;
         unsigned long long write_operation_count;
@@ -74,6 +86,7 @@ std::uint64_t process_read_transfer_bytes() {
     } counters{};
     if (GetProcessIoCounters(GetCurrentProcess(), &counters) == 0) { return 0; }
     return static_cast<std::uint64_t>(counters.read_transfer_count);
+#endif
 }
 
 // R6 of block 1: the first run of the line below printed disk_mib=0.000 AND io_read_mib=0.000 in all
@@ -83,6 +96,9 @@ std::uint64_t process_read_transfer_bytes() {
 // needs to compare against (a run that is KNOWN to read storage, e.g. PIN=1 loading 63.3 GiB, must
 // move that baseline). Two zeros with an unproven instrument are not a reading.
 bool process_io_query_ok() {
+#if !defined(_WIN32)
+    return false;
+#else
     struct IoCounters {
         unsigned long long read_operation_count;
         unsigned long long write_operation_count;
@@ -92,6 +108,7 @@ bool process_io_query_ok() {
         unsigned long long other_transfer_count;
     } counters{};
     return GetProcessIoCounters(GetCurrentProcess(), &counters) != 0;
+#endif
 }
 
 struct StageProfile {

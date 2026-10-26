@@ -31,6 +31,23 @@ T checked_mul(T a, T b) {
     return a * b;
 }
 
+#if !defined(_WIN32)
+// `size_t` is `unsigned long` here but `unsigned long long` on MSVC, so the template above cannot
+// deduce T from the mixed `36ULL` / size_t calls this file makes. Widen explicitly.
+[[nodiscard]] std::size_t checked_add(std::size_t a, unsigned long long b) {
+    return checked_add<std::size_t>(a, static_cast<std::size_t>(b));
+}
+[[nodiscard]] std::size_t checked_add(unsigned long long a, std::size_t b) {
+    return checked_add<std::size_t>(static_cast<std::size_t>(a), b);
+}
+[[nodiscard]] std::size_t checked_mul(std::size_t a, unsigned long long b) {
+    return checked_mul<std::size_t>(a, static_cast<std::size_t>(b));
+}
+[[nodiscard]] std::size_t checked_mul(unsigned long long a, std::size_t b) {
+    return checked_mul<std::size_t>(static_cast<std::size_t>(a), b);
+}
+#endif
+
 std::size_t checked_align_up_256(std::size_t bytes) {
     if (bytes > std::numeric_limits<std::size_t>::max() - 255ULL) {
         throw std::overflow_error("runtime plan: alignment overflow");

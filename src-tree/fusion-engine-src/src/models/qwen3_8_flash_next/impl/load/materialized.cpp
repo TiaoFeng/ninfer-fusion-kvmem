@@ -11,7 +11,9 @@
 #include <cstdlib>
 #include <cstring>
 // WIN32_LEAN_AND_MEAN/NOMINMAX before windows.h: PrefetchVirtualMemory is the only Win32 call this
-// file needs, and the lean header avoids the min/max macros colliding with <algorithm>.
+// file needs, and the lean header avoids the min/max macros colliding with <algorithm>. A Linux
+// build has no such call at all, so both the header and the prefetch below are Windows-only.
+#if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -19,6 +21,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#endif
 #include <thread>
 #include <chrono>
 #include <cstdio>
@@ -147,6 +150,7 @@ bool flash_next_ple_warm_enabled() {
 }
 
 [[nodiscard]] const char* memory_type_name(const void* address) {
+#if defined(_WIN32)
     MEMORY_BASIC_INFORMATION info{};
     if (::VirtualQuery(address, &info, sizeof(info)) == 0) { return "QUERY_FAILED"; }
     switch (info.Type) {
@@ -155,6 +159,11 @@ bool flash_next_ple_warm_enabled() {
     case MEM_PRIVATE: return "MEM_PRIVATE";
     default: return "MEM_OTHER";
     }
+#else
+    // The Win32 memory-type query has no portable equivalent; this is a diagnostic label only.
+    (void)address;
+    return "MEM_OTHER";
+#endif
 }
 
 // A mapped read that cannot name its object is useless when it fails: the error it would otherwise
@@ -278,6 +287,7 @@ int pin_readfile_mode() {
     return mode;
 }
 
+#if defined(_WIN32)
 std::wstring widen_utf8_path(const char* text) {
     if (text == nullptr || text[0] == '\0') { return {}; }
     const int needed = ::MultiByteToWideChar(CP_UTF8, 0, text, -1, nullptr, 0);
@@ -358,6 +368,25 @@ bool read_bank_from_file(const std::wstring& path, std::uint64_t file_offset, vo
     }
     return true;
 }
+#else
+// The read-file lane path below is Win32 (CreateFileW / ReadFile / FILE_FLAG_NO_BUFFERING). On other
+// platforms the caller falls back to the memcpy-from-mapping path, which is mode 0 on Windows too.
+std::wstring widen_utf8_path(const char* text) {
+    (void)text;
+    return {};
+}
+
+bool read_bank_from_file(const std::wstring& path, std::uint64_t file_offset, void* destination,
+                         std::size_t bytes, int mode, int lanes) {
+    (void)path;
+    (void)file_offset;
+    (void)destination;
+    (void)bytes;
+    (void)mode;
+    (void)lanes;
+    return false;
+}
+#endif
 
 Nvfp4ExpertBankView host_nvfp4_expert_bank_view(const artifact::MaterializedArtifact& backing,
                                                 artifact::ObjectHandle handle,
@@ -376,12 +405,17 @@ Nvfp4ExpertBankView host_nvfp4_expert_bank_view(const artifact::MaterializedArti
         const char* value = std::getenv("NINFER_FLASH_NEXT_PIN_PREFETCH");
         return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
     }();
+#if defined(_WIN32)
     if (read_ahead) {
         WIN32_MEMORY_RANGE_ENTRY range{};
         range.VirtualAddress = const_cast<void*>(source);
         range.NumberOfBytes  = source_bytes;
         ::PrefetchVirtualMemory(::GetCurrentProcess(), 1, &range, 0);
     }
+#else
+    // No Win32 prefetch on Linux; the flag stays parsed so the configuration is unchanged.
+    (void)read_ahead;
+#endif
 
     if (flash_next_experts_pinned_enabled()) {
         void* pinned             = nullptr;
