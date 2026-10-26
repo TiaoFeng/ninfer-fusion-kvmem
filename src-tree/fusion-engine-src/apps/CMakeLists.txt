@@ -34,6 +34,15 @@ ninfer_stage_runtime_dlls(ninfer)
 add_executable(ninfer-serve serve/main.cpp)
 ninfer_internal_includes(ninfer-serve)
 target_link_libraries(ninfer-serve PRIVATE ninfer_serve ninfer_product_logging)
+# GNU ld walks the link line left to right and never revisits an archive, so the order CMake derives
+# for MSVC (which re-scans the whole list) leaves `ninfer_model_loading`'s references to
+# `ninfer_model_runtime` unresolved on ELF: the loading archive is placed after the runtime one and
+# the symbols are reported as undefined at the very end. A rescanning group fixes the order problem
+# without changing which libraries are linked.
+if(NOT WIN32)
+  target_link_libraries(ninfer-serve PRIVATE
+    "$<LINK_GROUP:RESCAN,ninfer_serve,ninfer_engine,ninfer_model_runtime,ninfer_model_loading,ninfer_runtime_support,ninfer_ops,ninfer_core,ninfer_artifact,ninfer_text,ninfer_jinja,ninfer_calibration,ninfer_media_decode,ninfer_media_acquire,ninfer_product_prompt_input>")
+endif()
 ninfer_stamp_build_id(ninfer-serve)
 ninfer_stage_runtime_dlls(ninfer-serve)
 

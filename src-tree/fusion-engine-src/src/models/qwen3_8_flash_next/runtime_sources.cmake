@@ -30,7 +30,9 @@ target_sources(ninfer_model_runtime PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/impl/qsa_attention.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/impl/qsa_attention_kernels.cu"
   "${CMAKE_CURRENT_LIST_DIR}/impl/qsa_indexer.cpp"
-  "${CMAKE_CURRENT_LIST_DIR}/impl/qsa_indexer_kernels.cu"
+  # Linux engines build the stub: the real unit needs cub/device/device_topk.cuh, which the
+  # CCCL shipped with CUDA 13.1 does not provide. The qwen3_5 line never calls it.
+  "${CMAKE_CURRENT_LIST_DIR}/impl/qsa_indexer_kernels_linux_stub.cu"
   "${CMAKE_CURRENT_LIST_DIR}/impl/runtime_plan.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/impl/runtime_state.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/impl/stage_ledger.cpp"
