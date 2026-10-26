@@ -38,7 +38,12 @@
 > 同一会话第二轮 `cached 66,523`（prefill 208 ms）、视觉描述正确。
 > MTP 头已接线（2026-10-26）：`--components text,vision,mtp` 会把 `blk.64` 的 15 个参数原样搬进制品
 > （`mtp/input_projection` + 一层 full-attention + 三条 nextn 归一化），约 +335 MiB；`blk.64.nextn.embed_tokens.weight`
-> （Q4_K，715 MB）**不写入** —— 引擎的 MTP 头固定复用文本 token 表（`bind_mtp`）。
+> （Q4_K，715 MB）**不写入** —— 引擎的 MTP 头固定复用文本 token 表（`bind_mtp`）。块号由
+> `gguf_blocks.MTP_BLOCK` 推导，不写死 `blk.64`；`--source mtp=` **会被拒绝**（MTP 头只从
+> `--source ternary=` 的那份 GGUF 读；若传入的本身是 PTQ1_0 GGUF，还会更早在 gguf-py 解析阶段报
+> `143 is not a valid GGMLQuantizationType`），`--components` 缺省时按 GGUF 是否含该头自动选择。
+> artifact 的 `weights_id` 已把 component 列表算进去：同一份 GGUF 产出的 text+vision 与
+> text+vision+mtp 不再共用 identity。
 > 制品多了 `mtp` 组件后，`ninfer-serve` 要加 `--spec mtp` 才启用量子投机解码。
 > 实测（12 GB 显卡、temp 0、输出 400 token、93 token 题面）：`--spec none` 50.0 tok/s；
 > `--draft-tokens 1` 70.4（接受率 57.7%）、**`2` 91.1（61.8%，最佳）**、`3` 72.8（31.4%）、`4` 68.3；

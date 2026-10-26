@@ -80,7 +80,11 @@ except ModuleNotFoundError as error:  # pragma: no cover - guidance beats a bare
     ) from error
 
 TERNARY_KINDS = ("PQ2_0", "PTQ1_0")
-MTP_PREFIX = "blk.64."
+# The MTP layer is the block right after the text tower. Derive the number from the engine's own
+# constant instead of spelling "blk.64" here: a release with a different depth must not silently look
+# like a GGUF without a head.
+MTP_BLOCK_NAME = f"blk.{GB.MTP_BLOCK}"
+MTP_PREFIX = MTP_BLOCK_NAME + "."
 
 
 def vision_format(name: str) -> str:
@@ -126,7 +130,9 @@ def mtp_tensors() -> dict[str, tuple[tuple[int, ...], str]]:
 
 
 def has_mtp(gguf) -> bool:
-    return MTP_PREFIX + "nextn.eh_proj.weight" in gguf.tensors
+    """The engine's own predicate, so this recipe and `qwen3_8_27b_gguf` agree on what a merge is."""
+
+    return GB.has_mtp(gguf)
 
 
 # Read but never stored: the merged head's own token table. `bind_mtp`
@@ -147,7 +153,7 @@ def validate(gguf) -> None:
     if blocks != T.LAYERS + (1 if has_mtp(gguf) else 0):
         raise ValueError(
             f"{gguf.path}: qwen35.block_count = {blocks!r}, expected {T.LAYERS} text layers"
-            f"{' plus the merged MTP layer (65)' if has_mtp(gguf) else ' (64)'}"
+            f"{f' plus the merged MTP layer ({T.LAYERS + 1})' if has_mtp(gguf) else f' ({T.LAYERS})'}"
         )
 
     widths = tuple(int(width) for width in gguf.kv.get("prism.hadamard.sign_widths", ()))
@@ -237,8 +243,8 @@ def assign_mtp(model, recipe, gguf) -> None:
 
     if not has_mtp(gguf):
         raise ValueError(
-            f"{gguf.path}: --components names mtp, but this GGUF carries no merged blk.64 head. Use "
-            "the -mtp.gguf build, or leave mtp out of --components"
+            f"{gguf.path}: --components names mtp, but this GGUF carries no merged {MTP_BLOCK_NAME} "
+            "head. Use the -mtp.gguf build, or leave mtp out of --components"
         )
     encoded, direct = mtp_sources(gguf)
     formats = {}
@@ -306,37 +312,56 @@ def make_optional(sources):
                     "drop the drafter from --components"
                 )
         if "mtp" in model.components:
+            # `--source mtp=PATH` reaches `build_model` as a companion, but this recipe reads the
+            # merged head out of the ternary GGUF. Ignoring the file the caller named would ship a
+            # head they did not pick, so refuse it by name.
+            if "mtp" in {name for name in sources}:
+                raise ValueError(
+                    "--source mtp= is not used by this recipe: the merged "
+                    f"{MTP_BLOCK_NAME} head is read from the ternary GGUF (--source ternary=...). "
+                    "Drop the mtp source, or convert that file with a recipe that takes it."
+                )
             assign_mtp(model, recipe, sources["ternary"])
 
     return optional
 
 
-def _weights_id(gguf) -> str:
-    """A stable digest of the source GGUF: its first 8 MiB plus the data-section size."""
+def _weights_id(gguf, components) -> str:
+    """A stable digest of what the artifact holds: the source GGUF plus the component list.
+
+    The components belong in it: text+vision and text+vision+mtp are different artifacts over the same
+    GGUF, and an identity they share would tell any deduplicating tool they are interchangeable.
+    """
 
     path = Path(gguf.path)
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         digest.update(handle.read(8 * 1024 * 1024))
     digest.update(str(path.stat().st_size).encode("ascii"))
+    digest.update(b"\0" + ",".join(sorted(components)).encode("ascii"))
     return digest.hexdigest()
 
 
-def _install_identity(sources) -> None:
+def _install_identity(sources, components) -> None:
     """`pipeline.convert` never passes `identity`, which the v3 directory requires."""
 
     import tools.convert.pipeline as pipeline
 
-    current = pipeline.ArtifactWriter
-    if getattr(current, "_identity_injected", False):
-        return
     identity = {
         "model_id": "bonsai2-27b-ptq1",
-        "weights_id": _weights_id(sources["ternary"]),
+        "weights_id": _weights_id(sources["ternary"], components),
     }
+    current = pipeline.ArtifactWriter
+    if getattr(current, "_identity", None) == identity:
+        return
+    # Patch once per identity: wrapping an earlier `IdentifiedWriter` would stack `__init__` layers
+    # that all default the same keyword, and a second conversion in one process must not inherit the
+    # first one's identity.
+    base = getattr(current, "_identity_base", current)
 
-    class IdentifiedWriter(current):
-        _identity_injected = True
+    class IdentifiedWriter(base):
+        _identity = dict(identity)
+        _identity_base = base
 
         def __init__(self, *args, **kwargs):
             kwargs.setdefault("identity", dict(identity))
@@ -350,7 +375,7 @@ def bonsai2_27b_ternary(model, recipe, sources):
 
     T.validate = validate
     T._optional = make_optional(sources)
-    _install_identity(sources)
+    _install_identity(sources, model.components)
     return T.bonsai2_27b_ternary(model, recipe, sources)
 
 

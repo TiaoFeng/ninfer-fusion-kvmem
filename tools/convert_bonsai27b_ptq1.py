@@ -74,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--name", default="bonsai2-27b-ptq1", help="artifact metadata name")
     parser.add_argument("--components", default=None,
                         help="comma-separated components to build (default: text,vision,mtp when the "
-                             "GGUF carries the merged blk.64 head, else text,vision)")
+                             "GGUF carries a merged MTP head, else text,vision)")
     parser.add_argument("--python", default=sys.executable,
                         help="interpreter holding torch with CUDA (default: the one running this "
                              "script); the converter quantizes on the GPU")
@@ -95,14 +95,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.components is None:
         # The merged head is the only optional component the GGUFs can supply, so pick it whenever it
         # is there: a text+vision artifact silently drops the one weight set llama.cpp's users have
-        # that a speculative-decoding engine can use. GGUF header only -- no weights are read.
+        # that a speculative-decoding engine can use. GGUF header only -- no weights are read, and the
+        # predicate is the engine's own so this probe cannot drift from what the recipe will read.
         sys.path.insert(0, str(engine_src))
+        from tools.convert.gguf_blocks import has_mtp
         from tools.convert.sources.gguf import GGUFFile
 
         with GGUFFile(args.text_gguf) as probe:
-            merged = "blk.64.nextn.eh_proj.weight" in probe.tensors
+            merged = has_mtp(probe)
         args.components = "text,vision,mtp" if merged else "text,vision"
-        print(f"components: {args.components} ({'blk.64 present' if merged else 'no blk.64'})",
+        print(f"components: {args.components} ({'merged MTP head present' if merged else 'no MTP head'})",
               flush=True)
 
     # The converter quantizes on the GPU, so the interpreter must have torch built against CUDA.
