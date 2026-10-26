@@ -6,7 +6,10 @@ Two steps, no downloads and no HuggingFace checkpoint:
 1. `tools/make_hf_config_bonsai27b.py` derives the config-only model directory (geometry + the six
    frontend resources) from the text GGUF and the mmproj metadata;
 2. `python -m tools.convert` runs the local recipe (`tools/recipe_bonsai27b_ptq1.py`) with the text
-   tower from the ternary GGUF and Vision from the mmproj.
+   tower from the ternary GGUF, Vision from the mmproj, and -- when the GGUF is an `-mtp` build -- the
+   merged `blk.64` MTP head. That last one is what makes `--spec mtp` speculative decoding possible;
+   it is tiny next to the text tower (Q6_K/Q8_0, ~330 MB) because the head's own token table is not
+   stored (the engine hands it the text table).
 
 The engine source tree must already be configured for the conversion (Python 3.11 + torch with CUDA:
 the converter quantizes on the GPU).
@@ -69,8 +72,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--reuse-config", action="store_true",
                         help="skip step 1 and use the existing work directory as-is")
     parser.add_argument("--name", default="bonsai2-27b-ptq1", help="artifact metadata name")
-    parser.add_argument("--components", default="text,vision",
-                        help="comma-separated components to build (default text,vision)")
+    parser.add_argument("--components", default=None,
+                        help="comma-separated components to build (default: text,vision,mtp when the "
+                             "GGUF carries the merged blk.64 head, else text,vision)")
     parser.add_argument("--python", default=sys.executable,
                         help="interpreter holding torch with CUDA (default: the one running this "
                              "script); the converter quantizes on the GPU")
@@ -87,6 +91,19 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"{args.out} already exists; the converter refuses to overwrite")
     if args.out.suffix != ".ninfer":
         print(f"note: {args.out.name} does not end in .ninfer; the engine does not care", flush=True)
+
+    if args.components is None:
+        # The merged head is the only optional component the GGUFs can supply, so pick it whenever it
+        # is there: a text+vision artifact silently drops the one weight set llama.cpp's users have
+        # that a speculative-decoding engine can use. GGUF header only -- no weights are read.
+        sys.path.insert(0, str(engine_src))
+        from tools.convert.sources.gguf import GGUFFile
+
+        with GGUFFile(args.text_gguf) as probe:
+            merged = "blk.64.nextn.eh_proj.weight" in probe.tensors
+        args.components = "text,vision,mtp" if merged else "text,vision"
+        print(f"components: {args.components} ({'blk.64 present' if merged else 'no blk.64'})",
+              flush=True)
 
     # The converter quantizes on the GPU, so the interpreter must have torch built against CUDA.
     probe = subprocess.run(
