@@ -98,6 +98,10 @@ struct MtpWeights {
     WeightId input_projection, embedding_norm, hidden_norm, final_norm;
     BlockWeights layer;
     WeightId token_embedding, output_head;
+    // The draft's own token table when the artifact carries `mtp/token_embedding` (Qwen's
+    // `mtp.embeddings`); empty otherwise, and the draft then embeds with `token_embedding`, which is
+    // what every artifact written before this existed relies on.
+    std::optional<WeightId> own_token_embedding;
     WeightUseId output_head_use;
 };
 

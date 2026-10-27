@@ -101,6 +101,11 @@ struct MtpParameters {
     LinearParameters output;
     FfnParameters ffn;
     LinearParameters output_head;
+    // The draft head's own token table, when the artifact stores one. Empty means the head shares
+    // `TextParameters::token_embedding`, which is what `bind_mtp` does without it.
+    std::optional<Weight> token_embedding;
+    // Restore signs for a rotated table; empty for an unrotated one (a GGUF block format, say).
+    Tensor token_embedding_signs;
 };
 
 struct NormParameters {

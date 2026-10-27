@@ -304,6 +304,20 @@ public:
         out.output      = linear(a.output);
         out.ffn         = ffn(w.layer);
         out.output_head = head(w.output_head_use);
+        if (w.own_token_embedding) {
+            out.token_embedding = native_weight(model_.weight(*w.own_token_embedding).view);
+            // The artifact's own draft table is read through the same gather as the text table, so
+            // it may be stored rotated (then the head's sign vector restores it) or in a GGUF block
+            // format, which the gather decodes directly.
+            if (is_ternary(out.token_embedding->qtype)) {
+                const Tensor& signs = head(w.output_head_use).hadamard_signs;
+                if (!rotated(signs) || signs.ne[0] != out.token_embedding->k) {
+                    throw std::invalid_argument(
+                        "mtp/token_embedding is rotated but the head carries no matching signs");
+                }
+                out.token_embedding_signs = signs;
+            }
+        }
         return out;
     }
 

@@ -910,6 +910,7 @@ def build_model(
     components: tuple[str, ...] = ("text",),
     companions: Mapping[str, SafetensorsSource] | None = None,
     resource_overrides: Mapping[str, str | Path] | None = None,
+    mtp_dedicated_embeddings: bool = False,
 ) -> Model:
     selected = set(components)
     if "text" not in selected or selected - {
@@ -985,6 +986,11 @@ def build_model(
             ("final_norm", "norm"),
         ):
             builder.add("mtp/" + role, head, "mtp." + field + ".weight", (h,))
+        # A checkpoint whose draft head carries its own token table (`mtp.embeddings`) declares it
+        # here rather than in their config, so the artifact either stores `mtp/token_embedding` or
+        # leaves the head sharing `text/token_embedding`.
+        if mtp_dedicated_embeddings:
+            builder.add("mtp/token_embedding", head, "mtp.embeddings.weight", (r, h))
         builder.block("mtp/layers/0/", "mtp.layers.0.", head, config, "full_attention")
     if "vision" in selected:
         builder.vision(base, records["vision"]["config"], h)

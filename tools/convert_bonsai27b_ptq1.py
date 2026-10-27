@@ -79,6 +79,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="interpreter holding torch with CUDA (default: the one running this "
                              "script); the converter quantizes on the GPU")
     parser.add_argument("--dry-run", action="store_true", help="print the commands and stop")
+    parser.add_argument("--mtp-dedicated-embeddings", dest="mtp_dedicated", default=None,
+                        action="store_true",
+                        help="store the merged head's own token table as mtp/token_embedding "
+                             "(default: yes when the GGUF carries blk.<N>.nextn.embed_tokens)")
     args = parser.parse_args(argv)
 
     engine_src = args.engine_src.resolve()
@@ -92,20 +96,29 @@ def main(argv: list[str] | None = None) -> int:
     if args.out.suffix != ".ninfer":
         print(f"note: {args.out.name} does not end in .ninfer; the engine does not care", flush=True)
 
+    # Header-only probe: one read of the GGUF's tensor directory, no weights.
+    sys.path.insert(0, str(engine_src))
+    from tools.convert.gguf_blocks import has_mtp
+    from tools.convert.sources.gguf import GGUFFile
+
+    with GGUFFile(args.text_gguf) as probe:
+        merged = has_mtp(probe)
+        dedicated = any(name.endswith(".nextn.embed_tokens.weight") for name in probe.tensors)
+
     if args.components is None:
         # The merged head is the only optional component the GGUFs can supply, so pick it whenever it
         # is there: a text+vision artifact silently drops the one weight set llama.cpp's users have
-        # that a speculative-decoding engine can use. GGUF header only -- no weights are read, and the
-        # predicate is the engine's own so this probe cannot drift from what the recipe will read.
-        sys.path.insert(0, str(engine_src))
-        from tools.convert.gguf_blocks import has_mtp
-        from tools.convert.sources.gguf import GGUFFile
-
-        with GGUFFile(args.text_gguf) as probe:
-            merged = has_mtp(probe)
+        # that a speculative-decoding engine can use. The predicate is the engine's own so this probe
+        # cannot drift from what the recipe will read.
         args.components = "text,vision,mtp" if merged else "text,vision"
-        print(f"components: {args.components} ({'merged MTP head present' if merged else 'no MTP head'})",
-              flush=True)
+        print(f"components: {args.components} ({'merged MTP head present' if merged else 'no MTP head'}"
+              f"{', own token table' if merged and dedicated else ''})", flush=True)
+    if args.mtp_dedicated is None:
+        args.mtp_dedicated = bool(merged and dedicated)
+        if args.mtp_dedicated:
+            print("mtp: storing the head's own token table (mtp/token_embedding)", flush=True)
+    elif args.mtp_dedicated and not merged:
+        parser.error("--mtp-dedicated-embeddings needs a GGUF with a merged MTP head")
 
     # The converter quantizes on the GPU, so the interpreter must have torch built against CUDA.
     probe = subprocess.run(
@@ -153,6 +166,8 @@ def main(argv: list[str] | None = None) -> int:
         "--name", args.name,
         "--out", str(args.out.resolve()),
     ]
+    if args.mtp_dedicated:
+        command.append("--mtp-dedicated-embeddings")
     return run(command, cwd=engine_src, env=env)
 
 

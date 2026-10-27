@@ -54,6 +54,11 @@ prompt; `decode` from the engine's own request line, acceptance from `ninfer:dra
 Three drafts is where acceptance collapses, so two is the setting to start from; the attention
 window costs more acceptance than it saves. The head adds +335 MiB to the artifact and ~0.14 GiB of
 runtime state (131,072-token pool: 469 MiB free with `--spec mtp`, 946 MiB without).
+
+`--mtp-dedicated-embeddings` additionally stores the head's own token table as `mtp/token_embedding`
+(Q4_K, +715 MiB), which the engine uses when the artifact carries it. Same 10,434-token prompt,
+`--spec mtp --draft-tokens 2`: 96.7 tok/s at 68.5% acceptance sharing the text table, 104.2 tok/s at
+76.0% with its own (+7.8%).
 """
 
 from __future__ import annotations
@@ -143,11 +148,11 @@ def has_mtp(gguf) -> bool:
 
 
 # Read but never stored: the merged head's own token table. `bind_mtp`
-# (`src/models/qwen3_5/load/mtp.cpp`) hands the MTP head the text token table, so the artifact only
-# ever stores one table. The two are demonstrably different vectors -- sampled rows correlate at
-# cosine 0.887 against the un-rotated `token_embd` rows -- so the ~715 MB here is the only weight this
-# head carries that neither the engine's layout nor its draft step can use.
-MTP_UNUSED = (MTP_PREFIX + "nextn.embed_tokens.weight",)
+# (`src/models/qwen3_5/load/mtp.cpp`) hands the MTP head the text token table unless the artifact
+# stores `mtp/token_embedding`, which `--mtp-dedicated-embeddings` declares. The two tables are
+# demonstrably different vectors (sampled rows correlate at cosine 0.887), and building without the
+# flag is what the text+vision recipe did before the option existed.
+MTP_TOKEN_TABLE = MTP_PREFIX + "nextn.embed_tokens.weight"
 
 
 def validate(gguf) -> None:
@@ -180,7 +185,9 @@ def validate(gguf) -> None:
         raise ValueError(f"{gguf.path}: only token_embd.weight may be stored inverse-rotated")
 
     merged = mtp_tensors() if has_mtp(gguf) else {}
-    allowed = set(expected) | set(merged) | (set(MTP_UNUSED) if merged else set())
+    allowed = set(expected) | set(merged)
+    if merged:
+        allowed.add(MTP_TOKEN_TABLE)
     if set(gguf.tensors) != allowed:
         missing = sorted(allowed - set(gguf.tensors))[:5]
         extra = sorted(set(gguf.tensors) - allowed)[:5]
@@ -211,7 +218,7 @@ def validate(gguf) -> None:
         raise ValueError(f"{gguf.path}: the data section is truncated")
 
 
-def mtp_sources(gguf):
+def mtp_sources(gguf, *, dedicated_embedding: bool):
     """Encoded and direct sources of the merged `blk.64` head, in the ggml types it is stored in.
 
     `GB._layer` / `GB._attention` are the block-GGUF recipe's row maps: they undo llama.cpp's
@@ -228,6 +235,13 @@ def mtp_sources(gguf):
     encoded["mtp/input_projection"] = GB.block_source(
         gguf, g + "nextn.eh_proj.weight", (T.HIDDEN, 2 * T.HIDDEN), T.rows()
     )
+    # The head's own token table, when the model declares one: Q4_K in the release's GGUF, copied as
+    # stored. `ops::embedding` decodes GGUF block tables directly (`is_gguf(table.qtype)`), so this
+    # needs no dequantization and no rotation.
+    if dedicated_embedding:
+        encoded["mtp/token_embedding"] = GB.block_source(
+            gguf, MTP_TOKEN_TABLE, (T.VOCABULARY, T.HIDDEN), T.rows()
+        )
     for role, tensor in (
         ("embedding_norm", "nextn.enorm.weight"),
         ("hidden_norm", "nextn.hnorm.weight"),
@@ -253,7 +267,15 @@ def assign_mtp(model, recipe, gguf) -> None:
             f"{gguf.path}: --components names mtp, but this GGUF carries no merged {MTP_BLOCK_NAME} "
             "head. Use the -mtp.gguf build, or leave mtp out of --components"
         )
-    encoded, direct = mtp_sources(gguf)
+    wants_table = "mtp/token_embedding" in model.parameters
+    if wants_table and MTP_TOKEN_TABLE not in gguf.tensors:
+        raise ValueError(
+            f"{gguf.path}: the model declares mtp/token_embedding (--mtp-dedicated-embeddings) but "
+            f"this GGUF has no {MTP_TOKEN_TABLE}. Drop the flag, or use the release that carries it"
+        )
+    encoded, direct = mtp_sources(
+        gguf, dedicated_embedding="mtp/token_embedding" in model.parameters
+    )
     formats = {}
     for name, source in encoded.items():
         format = source.read_encoded(0, 1).format

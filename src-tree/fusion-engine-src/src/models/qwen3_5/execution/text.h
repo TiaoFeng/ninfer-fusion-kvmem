@@ -193,6 +193,11 @@ private:
         return mtp_kv_.valid() || batch_mtp_kv_ != nullptr;
     }
 
+    // The MTP draft's token table: its own (`mtp/token_embedding`) when the artifact stores one, the
+    // text table otherwise. The pair of accessors keeps the call sites free of the choice.
+    [[nodiscard]] const Weight& mtp_embedding_table() const;
+    [[nodiscard]] const Tensor& mtp_embedding_signs() const;
+
     void attn_mix(const BlockParameters& weights, Tensor& x, int index, Phase phase);
     void gdn_mix(const BlockParameters& weights, Tensor& x, int index, Phase phase);
     void mlp_tail(const BlockParameters& weights, Tensor& x, Phase phase,

@@ -291,6 +291,16 @@ void TextContext::set_gdn_state_action(GdnStateAction action,
     replay_records_   = replay_records;
 }
 
+const Weight& TextContext::mtp_embedding_table() const {
+    if (mtp_ && mtp_->token_embedding) { return *mtp_->token_embedding; }
+    return parameters_.text.token_embedding;
+}
+
+const Tensor& TextContext::mtp_embedding_signs() const {
+    if (mtp_ && mtp_->token_embedding) { return mtp_->token_embedding_signs; }
+    return parameters_.text.token_embedding_signs;
+}
+
 void TextContext::mtp_forward_stem(const Tensor& ids, const Tensor& hidden,
                                    const Tensor* input_embeddings, Tensor& x, Tensor& ah) {
     cudaStream_t s     = ctx_.stream;
@@ -311,7 +321,7 @@ void TextContext::mtp_forward_stem(const Tensor& ids, const Tensor& hidden,
         emb = input_embeddings->view({dimension(config_.hidden_size), T});
     } else {
         emb = roots.embedding;
-        embed_tokens(flat_ids, *embed_, parameters_.text.token_embedding_signs, emb, s);
+        embed_tokens(flat_ids, mtp_embedding_table(), mtp_embedding_signs(), emb, s);
     }
 
     Tensor e = roots.normalized_embedding;
@@ -1635,7 +1645,7 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                 if (multimodal != nullptr) {
                     mtp_input_embeddings =
                         work_.alloc(DType::BF16, {dimension(config_.hidden_size), len});
-                    embed_tokens(mtp_ids, *embed_, parameters_.text.token_embedding_signs,
+                    embed_tokens(mtp_ids, mtp_embedding_table(), mtp_embedding_signs(),
                                  mtp_input_embeddings, s);
                     if (vision_chunk.control != nullptr) {
                         const qwen3_5::MtpVisualOverlap overlap = qwen3_5::shifted_visual_overlap(

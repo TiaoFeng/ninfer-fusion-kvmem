@@ -136,6 +136,12 @@ def main(argv=None):
         help="comma-separated text,vision,mtp,dflash,dflash2",
     )
     parser.add_argument(
+        "--mtp-dedicated-embeddings",
+        action="store_true",
+        help="declare `mtp/token_embedding` for a draft head that carries its own token table; "
+        "the recipe must supply it",
+    )
+    parser.add_argument(
         "--resource",
         action="append",
         default=[],
@@ -175,6 +181,7 @@ def main(argv=None):
             components=components,
             companions=companions,
             resource_overrides=overrides,
+            mtp_dedicated_embeddings=args.mtp_dedicated_embeddings,
         )
         recipe = Recipe(model)
         _function(args.recipe)(model, recipe, sources)
